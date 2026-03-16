@@ -1,0 +1,113 @@
+name: confirm-jbpm-stage-flaky
+
+on:
+  push:
+    branches: [part3-jbpm-stage]
+  workflow_dispatch:
+
+jobs:
+  confirm-jbpm-stage-flaky:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Maven 3.9.14
+        run: |
+          set -eux
+          curl -fL https://downloads.apache.org/maven/maven-3/3.9.14/binaries/apache-maven-3.9.14-bin.tar.gz -o maven.tgz \
+            || curl -fL https://archive.apache.org/dist/maven/maven-3/3.9.14/binaries/apache-maven-3.9.14-bin.tar.gz -o maven.tgz
+          tar -xzf maven.tgz
+          echo "$GITHUB_WORKSPACE/apache-maven-3.9.14/bin" >> "$GITHUB_PATH"
+
+      - name: Clone jBPM
+        run: git clone https://github.com/kiegroup/jbpm.git jbpm
+
+      - name: Regular pass and NonDex fail
+        shell: bash
+        run: |
+          set +e
+          cd jbpm
+
+          TEST='org.jbpm.casemgmt.impl.StageCompletionConditionTest#testCaseFileVariableWithoutPrefix'
+
+          {
+            echo "== env =="
+            java -version
+            mvn -version
+            echo
+            echo "== repo head =="
+            git rev-parse HEAD
+            echo
+            echo "== target test grep =="
+            grep -n "testCaseFileVariableWithoutPrefix" \
+              jbpm-case-mgmt/jbpm-case-mgmt-impl/src/test/java/org/jbpm/casemgmt/impl/StageCompletionConditionTest.java || true
+            echo
+            echo "== bootstrap install attempt =="
+          } 2>&1 | tee "$GITHUB_WORKSPACE/ci-build.log"
+
+          mvn -B \
+            -pl jbpm-case-mgmt/jbpm-case-mgmt-impl \
+            -am \
+            -DskipTests \
+            -Dspotbugs.skip=true \
+            -Dcheckstyle.skip=true \
+            -Dlicense.skip=true \
+            -Drat.skip=true \
+            install 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          BOOTSTRAP_EXIT=${PIPESTATUS[0]}
+          echo "bootstrap_exit=$BOOTSTRAP_EXIT" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+
+          echo | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          echo "== regular module-only run ==" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+
+          mvn -B \
+            -f jbpm-case-mgmt/jbpm-case-mgmt-impl/pom.xml \
+            -Dtest="$TEST" \
+            -DforkCount=1 \
+            -DreuseForks=false \
+            -Dsurefire.failIfNoSpecifiedTests=false \
+            test 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          REG_EXIT=${PIPESTATUS[0]}
+          echo "regular_exit=$REG_EXIT" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+
+          echo | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          echo "== nondex module-only run ==" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+
+          mvn -B \
+            -f jbpm-case-mgmt/jbpm-case-mgmt-impl/pom.xml \
+            -Dtest="$TEST" \
+            -DforkCount=1 \
+            -DreuseForks=false \
+            -Dsurefire.failIfNoSpecifiedTests=false \
+            edu.illinois:nondex-maven-plugin:2.2.1:nondex \
+            -DnondexRuns=1 2>&1 | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          NONDEX_EXIT=${PIPESTATUS[0]}
+          echo "nondex_exit=$NONDEX_EXIT" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+
+          if [ "$REG_EXIT" -ne 0 ]; then
+            echo "Regular run failed unexpectedly" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+            exit 1
+          fi
+
+          if [ "$NONDEX_EXIT" -eq 0 ]; then
+            echo "NonDex run unexpectedly passed" | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+            exit 1
+          fi
+
+          echo "Expected pattern confirmed: regular pass, NonDex fail." | tee -a "$GITHUB_WORKSPACE/ci-build.log"
+          exit 1
+
+      - name: Upload ci-build.log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-log
+          path: ci-build.log
